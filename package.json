@@ -1,0 +1,19 @@
+{
+  "name": "msg-bridge-svr",
+  "version": "1.0.0",
+  "description": "msg sender/receive based on sse and fetch",
+  "main": "svr/demo.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "config":{
+    "port":3000
+  },
+  "keywords": [
+    "sse",
+    "msg",
+    "sharedworker"
+  ],
+  "author": "rockedpanda",
+  "license": "MIT"
+}
