@@ -1,4 +1,4 @@
-# 基于SSE的消息通知
+# 基于SSE的消息通知-服务端
 
 ## 目的
 基于SSE通道, 实现简单的在线消息推送机制。实现消息类型注册，监听的单向数据推送。较Websocket或Socket.io方案更为简化。
@@ -13,7 +13,28 @@
 ### 后端模块
 后端模块以connect/express中间件方式存在, 提供对路由的监听处理, 方便挂载路由和处理。
 
-使用样例如下：
+设计目标为单个客户端与服务器之间维护最多一个长连接, 该连接以SSE方式存在.
+
+该连接在服务端维护, 当遇到需要向该客户端推送消息时(以clientId为识别客户端的唯一标识), 根据clientId找到对应SSE的socket, 向该socket发送消息,写入内容. 对于客户端, 该SSE在SharedWorker内创建, 以实现各个浏览器页面共享一份SSE连接的效果.
+
+```mermaid
+graph TB
+服务端
+S1 <-.SSE1.-> 服务端
+S2[SharedWorker] <-.SSE2.-> 服务端
+subgraph 客户端1
+页面1 <--> sdk实例1 <--> S1[SharedWorker]
+页面2 <--> sdk实例2 <--> S1
+页面3 <--> sdk实例3 <--> S1
+end
+subgraph 客户端2
+页面4 <--> sdk实例4 <--> S2
+页面5 <--> sdk实例5 <--> S2
+end
+```
+
+
+客户端使用样例如下：
 ```javascript
 let ssemsg = require('ssemsg');
 app.use('/msg', new SseMsg());
