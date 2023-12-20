@@ -4,7 +4,7 @@ const ALL_SOCKETS = {}; //{client_id:Socket}, 每个client_id复用同一个链�
 
 const zlib = require('zlib'); //消息压缩gzip
 const mq_cache = require('../lib/lib.mq_cache'); //消息缓存队列,缓存最后1s内的消息,避免SSE重连期间的消息丢失问题.
-const CLOSE_SSE_AFTER_DATA_SEND = global.configInfo.SSE_AS_PULL==='1';//发送数据后立即重建SSE,避免消息被缓存的情况.(长轮询替代SSE)
+const CLOSE_SSE_AFTER_DATA_SEND = global.configInfo.SSE_AS_PULL==='1';//发送数据后立即重建SSE,避免消息被缓存的情况(如nginx配置了错误的缓存机制).(本质为用长轮询替代SSE)
 
 let snowflakeId = require('./lib.snowflake').get;//雪花算法
 
@@ -16,7 +16,7 @@ let snowflakeId = require('./lib.snowflake').get;//雪花算法
 function sendMsg(client_id, msg) {
   const targetSocket = ALL_SOCKETS[client_id] || {};
   if (targetSocket.isClose !== true) {
-    return;
+    return false;
   }
   if (msg && !msg.msg_id) {
     msg.msg_id = snowflakeId();
@@ -25,15 +25,16 @@ function sendMsg(client_id, msg) {
   if (!!msg.client_id && msg.client_id !== '*') {
     if (targetSocket.client_id !== msg.client_id) {
       // console.log('client_id不匹配--------')
-      return; //与消息中携带的client_id不匹配时,跳过
+      return false; //与消息中携带的client_id不匹配时,跳过
     }
   }
   sendMsgToRes(targetSocket, msg);
+  return true;
 }
 
 function sendMsgToClientId(client_id, msg){
   if(!client_id || client_id=='*'){ //暂不支持client_id为*的情况, 后续再扩展
-    return;
+    return false;
   }
   //现根据client_id查找具体哪一个
   return sendMsg(client_id, msg);
@@ -165,7 +166,7 @@ function sseConnect(req, res, next) {
   } */
   let client_id = req.query.client_id;
   let token = req.query.token;
-  let last_msg_id = parseInt(req.header('last-event-id')||'0', 10);
+  let last_msg_id = parseInt(req.header('last-event-id')||'0', 10); //SSE客户端会自动携带上一次消息的id(如果存在),可以根据此id查询有无缓存消息
   //常规模式下, 采用SSE或者长轮询方案
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
