@@ -1,5 +1,5 @@
 //所有当前已经建立的链接对象,整体是一个map,
-const ALL_SOCKETS = {}; //{client_id:Socket}, 每个client_id复用同一个链接(一个浏览器保留一个,用户退出登录后自动断开)
+const CLIENT_SOCKET_MAP = {}; //{client_id:Socket}, 每个client_id复用同一个链接(一个浏览器保留一个,用户退出登录后自动断开)
 // const ONLINE_MAP = new Map(); //{user_id:{client_id_1:true, client_id_2:true}}, 每个浏览器仅能一个用户登录, 但一个用户可以多浏览器/手机端登录, 用户与客户端为1对多的关系: 【移除，通过实时运算ALL_COKETS替代】
 
 const zlib = require('zlib'); //消息压缩gzip
@@ -14,7 +14,7 @@ let snowflakeId = require('./lib.snowflake').get;//雪花算法
  * @param {Object} msg 待发送的消息体
  */
 function sendMsg(client_id, msg) {
-  const targetSocket = ALL_SOCKETS[client_id] || {};
+  const targetSocket = CLIENT_SOCKET_MAP[client_id] || {};
   if (targetSocket.isClose !== true) {
     return false;
   }
@@ -84,17 +84,17 @@ function sendMsgToClientId(client_id, msg){
  * @param {HTTPResponse} socket 具体的httpResponse对象
  */
 function addSocket(socket, client_id, user_id){
-  if(!ALL_SOCKETS[client_id]){
-    ALL_SOCKETS[client_id] = socket;
+  if(!CLIENT_SOCKET_MAP[client_id]){
+    CLIENT_SOCKET_MAP[client_id] = socket;
   }else{
-    if(ALL_SOCKETS[client_id].isClose){
+    if(CLIENT_SOCKET_MAP[client_id].isClose){
       console.log('旧的连接已经断开,直接覆盖即可');
-      //ALL_SOCKETS[client_id].end();
+      //CLIENT_SOCKET_MAP[client_id].end();
     }else{
-      ALL_SOCKETS[client_id].end();
+      CLIENT_SOCKET_MAP[client_id].end();
     }
     //已经存在对应的连接, 放弃或者覆盖：【覆盖】 
-    ALL_SOCKETS[client_id] = socket;
+    CLIENT_SOCKET_MAP[client_id] = socket;
   }
   socket.client_id = client_id;
   socket.user_id = user_id||'';
@@ -105,7 +105,7 @@ function addSocket(socket, client_id, user_id){
   
   socket.on('close', function(){ //链接断开后从数组中移除
     console.log('移除断开的SSE链接:client_id:',client_id);
-    delete ALL_SOCKETS[client_id];
+    delete CLIENT_SOCKET_MAP[client_id];
   });
 }
 
@@ -145,7 +145,7 @@ function getMsgListForClient({client_id, last_msg_id=0}){
 //给定一个client_id,立即发送一次重连消息
 function closeClientId(client_id){
   console.log('查询并关闭如下连接:', client_id);
-  let x = ALL_SOCKETS[client_id];
+  let x = CLIENT_SOCKET_MAP[client_id];
   let t = randomTime();
   x.write('retry:'+t+'\n\nevent: msg\nid: '+snowflakeId()+'\ndata:'+Date.now()+':自动重连\n\n');
   x.end();
@@ -182,11 +182,11 @@ function sseConnect(req, res, next) {
  * 清理已经断开的连接, 收尾手段, 用于定时清理
  */
 function clearClosedSocket(){
-  Object.keys(ALL_SOCKETS).forEach(k=>{
+  Object.keys(CLIENT_SOCKET_MAP).forEach(k=>{
       //由于涉及到从数组中删除元素,会导致length变化,故采用从后向前遍历的方式
-      let socket = ALL_SOCKETS[k];
+      let socket = CLIENT_SOCKET_MAP[k];
       if(socket.isClose){
-        delete ALL_SOCKETS[k];
+        delete CLIENT_SOCKET_MAP[k];
       }
   });
 }
@@ -199,7 +199,7 @@ setInterval(clearClosedSocket, 600*1000);
  */
 function sendHeartBeat() {
   //let now = Date.now();
-  Object.values(ALL_SOCKETS).forEach(x => {
+  Object.values(CLIENT_SOCKET_MAP).forEach(x => {
     sendMsgToRes(x, ''); //心跳是空内容
   });
 }
@@ -208,7 +208,7 @@ function randomTime(){
   return 10 + (Math.random()*200>>0);
 }
 
-setInterval(sendHeartBeat, 1000*60); //由60s一次改为6s一次,打散下发心跳的频率
+setInterval(sendHeartBeat, 1000*60); //由60s一次下发心跳
 
 //查询一组用户的在线状态信息
 function getOnlineStateForUsers(user_ids){
@@ -223,7 +223,7 @@ function getOnlineStateForUsers(user_ids){
 
 //查询所有当前在线用户列表
 function getOnlineUsers(){
-  return Array.from(new Set(Object.values(ALL_SOCKETS).map(x=>x.user_id)));
+  return Array.from(new Set(Object.values(CLIENT_SOCKET_MAP).map(x=>x.user_id)));
 }
 
 //返回单个用户的在线状态信息
@@ -232,7 +232,7 @@ function formatOnlineInfo(user_id){
   if(!user_id){
     return ans;
   }
-  let clients = Object.values(ALL_SOCKETS).filter(x=>x.user_id==user_id).map(x=>x.client_id);
+  let clients = Object.values(CLIENT_SOCKET_MAP).filter(x=>x.user_id==user_id).map(x=>x.client_id);
   if(clients.length===0){
     return ans;
   }
@@ -243,9 +243,9 @@ function formatOnlineInfo(user_id){
 }
 
 function demo(){
-  Object.keys(ALL_SOCKETS).forEach(clientId=>{
+  Object.keys(CLIENT_SOCKET_MAP).forEach(clientId=>{
     console.log('GO_NOW_111');
-    sendMsgToRes(ALL_SOCKETS[clientId], {msg:'GO_NOW_111'+Date.now(),client_id:'*'});
+    sendMsgToRes(CLIENT_SOCKET_MAP[clientId], {msg:'GO_NOW_111'+Date.now(),client_id:'*'});
   });
 }
 setInterval(demo, 3000);
