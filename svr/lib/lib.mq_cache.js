@@ -5,15 +5,11 @@ let _ = require('underscore');
 let snowflakeId = require('./lib.snowflake').get;
 let cache = [];
 const EXPIRE_TIME = 10000;//默认过期时间10s,10s后自动舍弃.
-let lastId = 0;
 
 //将一个消息加入到队列中
 function add(msg){
   if(!msg){
     return;
-  }
-  if(msg.msgType=='log'){
-    return msg;
   }
   if(!msg.msg_id){
     msg.msg_id = snowflakeId();
@@ -27,11 +23,10 @@ function add(msg){
   }
   cache.push(msg);
   //console.log('>>>>>>>>>>>>>>', cache.map(x=>x.msg_id));
-  lastId = Math.max(msg.msg_id, lastId);
   return msg;
 }
 
-//根据msg_id移除一个元素
+//根据msg_id移除一个元素,不存在则判定为删除成功
 function removeById(msg_id){
   let itemIndex = cache.findIndex(x=>x.msg_id===msg_id);
   if(itemIndex===-1){
@@ -50,7 +45,9 @@ function clear(){
   let now = Date.now();
   for(let i=cache.length-1;i>-1;i--){ //由于要删除数据,从后向前循环
     if(cache[i].expire < now){
-      cache.splice(i,1);
+      //cache.splice(i,1);
+      cache.splice(0, i); //由于插入时是按照时间先后进行的,找到最后一个,前面的都可以删除.
+      return;
     }
   }
 }

@@ -1,21 +1,52 @@
+/**
+ * 实现到单个客户端的唯一的SSE推送通道, Express框架中间件
+ */
+
 //所有当前已经建立的链接对象,整体是一个map,
 const CLIENT_SOCKET_MAP = {}; //{client_id:Socket}, 每个client_id复用同一个链接(一个浏览器保留一个,用户退出登录后自动断开)
-// const ONLINE_MAP = new Map(); //{user_id:{client_id_1:true, client_id_2:true}}, 每个浏览器仅能一个用户登录, 但一个用户可以多浏览器/手机端登录, 用户与客户端为1对多的关系: 【移除，通过实时运算ALL_COKETS替代】
-
 const zlib = require('zlib'); //消息压缩gzip
 const mq_cache = require('../lib/lib.mq_cache'); //消息缓存队列,缓存最后1s内的消息,避免SSE重连期间的消息丢失问题.
 const CLOSE_SSE_AFTER_DATA_SEND = global.configInfo.SSE_AS_PULL==='1';//发送数据后立即重建SSE,避免消息被缓存的情况(如nginx配置了错误的缓存机制).(本质为用长轮询替代SSE)
 
 let snowflakeId = require('./lib.snowflake').get;//雪花算法
 
+/** 【中间件主入口】
+ * 创建一个SSE链接并将res记录到socket数组中
+ * @param {HTTPRequest} req http请求, 其url中需要携带 client_id作为客户端的唯一标识
+ * @param {HTTPResponse} res http响应
+ * @param {Function} next 中间件next
+ * @returns 
+ */
+function sseConnect(req, res, next) {
+  /* let cookie = req.header.cookie;
+  if(!cookie){
+    res.status(403).send('认证失败'); //移除认证, 如需认证, 请在此中间件之前额外配置单独的认证用的中间件.
+    return;
+  } */
+  let client_id = req.query.client_id;
+  let last_msg_id = parseInt(req.header('last-event-id')||'0', 10); //SSE客户端会自动携带上一次消息的id(如果存在),可以根据此id查询有无缓存消息
+  //常规模式下, 采用SSE或者长轮询方案
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Transfer-Encoding': 'identity',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  addSocket(res, client_id, last_msg_id);
+  sendLastestMsgAndClose(res, client_id, last_msg_id, !CLOSE_SSE_AFTER_DATA_SEND);
+}
+
 /**
- * 向某个场景下的所有客户端发送消息
+ * 根据client_id向该客户端发送消息
  * @param {String} client_id client_id
- * @param {Object} msg 待发送的消息体
+ * @param {Object} msg 待发送的消息体, JSON对象
  */
 function sendMsg(client_id, msg) {
+  if(!client_id){
+    return; //没有指定client_id,则跳过
+  }
   const targetSocket = CLIENT_SOCKET_MAP[client_id] || {};
-  if (targetSocket.isClose !== true) { //兼容undefined等特殊状态,如果已经关闭
+  if (targetSocket.isClose !== true) { //兼容没有该客户端, 或者已关闭等特殊状态
     return false;
   }
   if (msg && !msg.msg_id) {
@@ -46,9 +77,7 @@ function sendMsgToClientId(client_id, msg){
  * @param {Object} msg 待发送的消息体
  * @param {Number} retry 客户端断开后的重连等待时间,默认为100(毫秒)
  * @param {Object} options 其他参数,doNotClose为true时,不主动关闭连接,由其他地方负责关闭
-  //举例: msg:1629807202667:{a:1,b:2} 或者
-  //举例: msg:1629807202667:base64:xxxxxxxx 
-  //举例: msg:1629807202667:base64:gzip:xxxxxxxx 
+
  */
  function sendMsgToRes(res, msg, retry=100, options={}) {
   let type = msg.msgType || 'msg';
@@ -74,7 +103,7 @@ function sendMsgToClientId(client_id, msg){
   }
   let text = 'retry:'+retry+'\n\n'+'event: '+type+'\nid: '+msg_id+'\ndata:'+Date.now()+':'+msg+' '+'\n\n';
   console.log('发送SSE消息:',text, CLOSE_SSE_AFTER_DATA_SEND);
-  res.last_msg_id = msg_id;
+  res.last_msg_id = msg_id; //目前服务端记录last_msg_id仅是为了定位用,暂没有用于逻辑控制.
   res.write(text);
   if(!options.doNotClose && CLOSE_SSE_AFTER_DATA_SEND && (isRealMsg || (Date.now() - res.start_time > 55000))){ //超过55s则断开一次,目的是防止网络中间有nginx等不可控环节导致数据被缓存挤压,后续这部分的设计迁移到SSE_AS_PULL开关中
     //有真实消息(非心跳)则立即断开,
@@ -83,6 +112,34 @@ function sendMsgToClientId(client_id, msg){
     removeSocket(res);
   }
 }
+
+/* 消息序列化
+  举例: msg:1629807202667:{a:1,b:2} 或者
+  举例: msg:1629807202667:base64:xxxxxxxx 
+  举例: msg:1629807202667:base64:gzip:xxxxxxxx 
+*/
+function encodeMsg(msg){
+  let msg_id = msg.msg_id || snowflakeId();
+  if(msg instanceof Buffer){
+    //TODO: 原始二进制的数据,待实现
+  }else if(typeof msg !== 'string'){
+    if(!msg.msg_id){
+      msg.msg_id = msg_id;
+    }
+    msg = JSON.stringify(msg);
+  }
+  if(msg.indexOf('\n\n')!==-1||msg.length>2048){ //长度大于2K或者如果含有特殊字符\n\n,则转base64后传输; 不含有特殊字符的直接传
+    // msg='base64:'+ Buffer.from(unescape(encodeURIComponent(msg))).toString('base64'); 
+    //后端转base64不需要encodeURIComponent,前端仍然需要
+    msg='base64:gzip:'+ zlib.gzipSync(msg).toString('base64');
+  }else if(msg instanceof Buffer){
+    msg='base64:'+msg.toString('base64');
+  }
+}
+
+// function write(res, msg){
+//   let text = 'retry:'+retry+'\n\n'+'event: '+type+'\nid: '+msg_id+'\ndata:'+Date.now()+':'+msg+' '+'\n\n';
+// }
 
 /**
  * 根据客户端id或连接移除一个客户端缓存
@@ -96,14 +153,15 @@ function removeSocket(res){
   if(CLIENT_SOCKET_MAP[client_id]){
     delete CLIENT_SOCKET_MAP[client_id];
   }
+  //如果有缓存消息,会过10s自动清理,这里不再手动清理.同时也避免重连间歇内的数据丢失.
 }
 
 /**
  * 将一个httpResponse对象记录到浏览器id对应的socket中
- * @param {String} client_id 浏览器id
  * @param {HTTPResponse} socket 具体的httpResponse对象
+ * @param {String} client_id 浏览器id
  */
-function addSocket(socket, client_id, user_id){
+function addSocket(socket, client_id, last_msg_id){
   if(!CLIENT_SOCKET_MAP[client_id]){
     CLIENT_SOCKET_MAP[client_id] = socket;
   }else{
@@ -119,15 +177,14 @@ function addSocket(socket, client_id, user_id){
     CLIENT_SOCKET_MAP[client_id] = socket;
   }
   socket.client_id = client_id;
-  socket.user_id = user_id||'';
   socket.start_time = Date.now();
-  socket.last_msg_id = 0;
+  socket.last_msg_id = last_msg_id || 0;
 
   sendMsgToRes(socket, '连接成功'); //发一个连接成功的常规消息,以便触发前端的e_sse_init
   
   socket.on('close', function(){ //链接断开后从数组中移除
     console.log('移除断开的SSE链接:client_id:',client_id);
-    delete CLIENT_SOCKET_MAP[client_id];
+    removeSocket(client_id);
   });
 }
 
@@ -161,39 +218,13 @@ function getMsgListForClient({client_id, last_msg_id=0}){
 }
 
 //给定一个client_id,立即发送一次重连消息
-function closeClientId(client_id){
+function reconnectClient(client_id){
   console.log('查询并关闭如下连接:', client_id);
   let res = CLIENT_SOCKET_MAP[client_id];
   let t = randomTime();
   res.write('retry:'+t+'\n\nevent: msg\nid: '+snowflakeId()+'\ndata:'+Date.now()+':自动重连\n\n');
   res.end();
   removeSocket(res);
-}
-
-/**
- * 创建一个SSE链接并将res记录到socket数组中
- * @param {HTTPRequest} req http请求
- * @param {HTTPResponse} res http响应
- * @param {Function} next 中间件next
- * @returns 
- */
-function sseConnect(req, res, next) {
-  /* let cookie = req.header.cookie;
-  if(!cookie){
-    res.status(403).send('认证失败'); //移除认证, 如需认证, 请在此中间件之前额外配置单独的认证用的中间件.
-    return;
-  } */
-  let client_id = req.query.client_id;
-  let last_msg_id = parseInt(req.header('last-event-id')||'0', 10); //SSE客户端会自动携带上一次消息的id(如果存在),可以根据此id查询有无缓存消息
-  //常规模式下, 采用SSE或者长轮询方案
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Transfer-Encoding': 'identity',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  addSocket(res, client_id );
-  sendLastestMsgAndClose(res, client_id, last_msg_id, !CLOSE_SSE_AFTER_DATA_SEND);
 }
 
 /**
@@ -213,53 +244,20 @@ setInterval(clearClosedSocket, 600*1000);
 
 /**
  * 向所有连接发送心跳信息
- * 由一批次发送,改为10个批次发送,以6s为一个间隔;减少瞬间的并发导致的压力
  */
 function sendHeartBeat() {
-  //let now = Date.now();
   Object.values(CLIENT_SOCKET_MAP).forEach(x => {
-    sendMsgToRes(x, ''); //心跳是空内容
+    sendMsgToRes(x, ''); //心跳是空内容, 心跳消息不需要加入到缓存
   });
 }
+setInterval(sendHeartBeat, 1000*60); //由60s一次下发心跳
+
 //返回一个10-210ms的随机数, 方便离散化retry时间,避免并发
 function randomTime(){
   return 10 + (Math.random()*200>>0);
 }
 
-setInterval(sendHeartBeat, 1000*60); //由60s一次下发心跳
-
-//查询一组用户的在线状态信息
-function getOnlineStateForUsers(user_ids){
-  if(!user_ids){
-    return [];
-  }
-  let ids = user_ids.trim().split(',');
-  return ids.map(x=>{
-    return formatOnlineInfo(x);
-  });
-}
-
-//查询所有当前在线用户列表
-function getOnlineUsers(){
-  return Array.from(new Set(Object.values(CLIENT_SOCKET_MAP).map(x=>x.user_id)));
-}
-
-//返回单个用户的在线状态信息
-function formatOnlineInfo(user_id){
-  let ans = {user_id:user_id,app:'',pc:'',online:false};
-  if(!user_id){
-    return ans;
-  }
-  let clients = Object.values(CLIENT_SOCKET_MAP).filter(x=>x.user_id==user_id).map(x=>x.client_id);
-  if(clients.length===0){
-    return ans;
-  }
-  ans.online = true;
-  ans.pc = clients.filter(x=>x.startsWith('pc_')).join(',');
-  ans.app = clients.filter(x=>x.startsWith('app_')).join(',');
-  return ans;
-}
-
+/* 测试用, 每3s发一个特定消息
 function demo(){
   Object.keys(CLIENT_SOCKET_MAP).forEach(clientId=>{
     console.log('GO_NOW_111');
@@ -267,9 +265,9 @@ function demo(){
   });
 }
 setInterval(demo, 3000);
+*/
 
 exports.sseConnect = sseConnect;
 exports.sendMsg = sendMsg;
 exports.sendMsgToClientId = sendMsgToClientId;
-exports.getOnlineStateForUsers = getOnlineStateForUsers;
-exports.getOnlineUsers = getOnlineUsers;
+exports.reconnectClient = reconnectClient;
