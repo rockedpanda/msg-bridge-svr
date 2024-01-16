@@ -5,8 +5,7 @@ const express = require('express');
 const app = express();
 app.disable('x-powered-by');
 const bodyParser = require('body-parser');
-app.post(`/${packageInfo.name}/*`, bodyParser.json({limit:'200mb'}));
-app.use(`/${packageInfo.name}/*`, bodyParser.urlencoded({ extended: false }));
+
 let server = null;
 if(/\d+\.\d+\.\d+\.\d+:\d+/.test(configInfo.port)){ //带有ip地址的情况,实现仅绑定到127.0.0.1等情况
   let port = configInfo.port.split(':')[1];
@@ -17,6 +16,9 @@ if(/\d+\.\d+\.\d+\.\d+:\d+/.test(configInfo.port)){ //带有ip地址的情况,�
 server.setTimeout(600000);//接口超时时间改为10分钟
 console.log('listenning on '+configInfo.port);
 app.use(express.static(path.resolve(__dirname,'../public'), {maxAge:300*1000}))
+
+app.post('/sse/*',bodyParser.json({limit:'200mb'}));
+app.use('/sse/*',bodyParser.urlencoded({ extended: false }));
 
 app.use('/sse', require('./sse'));
 

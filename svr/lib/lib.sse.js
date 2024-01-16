@@ -46,8 +46,11 @@ function sendMsg(client_id, msg) {
     return; //没有指定client_id,则跳过
   }
   const targetSocket = CLIENT_SOCKET_MAP[client_id] || {};
-  if (targetSocket.isClose !== true) { //兼容没有该客户端, 或者已关闭等特殊状态
+  if (isClose(targetSocket)) { //兼容没有该客户端, 或者已关闭等特殊状态
     return false;
+  }
+  if(typeof msg ==='string'){
+    msg = {msg_type:'msg', data: msg};
   }
   if (msg && !msg.msg_id) {
     msg.msg_id = snowflakeId();
@@ -73,73 +76,78 @@ function sendMsgToClientId(client_id, msg){
 
 /**
  * 向某个链接发送消息
- * @param {httpResponse} res 待接收消息的response对象
+ * @param {httpResponse} res 待接收消息的response对象 或者 response对象数组
  * @param {Object} msg 待发送的消息体
  * @param {Number} retry 客户端断开后的重连等待时间,默认为100(毫秒)
  * @param {Object} options 其他参数,doNotClose为true时,不主动关闭连接,由其他地方负责关闭
-
  */
- function sendMsgToRes(res, msg, retry=100, options={}) {
+function sendMsgToRes(res, msg, retry=100, options={}) {
+  if(!Array.isArray(res)){
+    res = [res];
+  }
   let type = msg.msgType || 'msg';
   const isRealMsg = msg && type!=='sse_connected'; //有真实内容的消息,不是心跳或sse_connected
   if(isRealMsg){
     msg = mq_cache.add(msg);
   }
-  let msg_id = msg.msg_id || snowflakeId();
-  if(msg instanceof Buffer){
-    //TODO: 原始二进制的数据,待实现
-  }else if(typeof msg !== 'string'){
-    if(!msg.msg_id){
-      msg.msg_id = msg_id;
-    }
-    msg = JSON.stringify(msg);
-  }
-  if(msg.indexOf('\n\n')!==-1||msg.length>2048){ //长度大于2K或者如果含有特殊字符\n\n,则转base64后传输; 不含有特殊字符的直接传
-    // msg='base64:'+ Buffer.from(unescape(encodeURIComponent(msg))).toString('base64'); 
-    //后端转base64不需要encodeURIComponent,前端仍然需要
-    msg='base64:gzip:'+ zlib.gzipSync(msg).toString('base64');
-  }else if(msg instanceof Buffer){
-    msg='base64:'+msg.toString('base64');
-  }
-  let text = 'retry:'+retry+'\n\n'+'event: '+type+'\nid: '+msg_id+'\ndata:'+Date.now()+':'+msg+' '+'\n\n';
-  console.log('发送SSE消息:',text, CLOSE_SSE_AFTER_DATA_SEND);
-  res.last_msg_id = msg_id; //目前服务端记录last_msg_id仅是为了定位用,暂没有用于逻辑控制.
-  res.write(text);
-  if(!options.doNotClose && CLOSE_SSE_AFTER_DATA_SEND && (isRealMsg || (Date.now() - res.start_time > 55000))){ //超过55s则断开一次,目的是防止网络中间有nginx等不可控环节导致数据被缓存挤压,后续这部分的设计迁移到SSE_AS_PULL开关中
-    //有真实消息(非心跳)则立即断开,
-    //无真实消息,则大于55s才会断开(确保心跳和延时控制下发)
-    res.end();
-    removeSocket(res);
+  let data = encodeMsg(msg);
+  res.forEach(x=>writeRes(x, data, type));
+  if(!options.doNotClose && CLOSE_SSE_AFTER_DATA_SEND ){ //超过55s则断开一次,目的是防止网络中间有nginx等不可控环节导致数据被缓存挤压,后续这部分的设计迁移到SSE_AS_PULL开关中
+    res.forEach(x=>{
+      if(isRealMsg || (Date.now() - x.start_time > 55000)){
+        //有真实消息(非心跳)则立即断开,
+        //无真实消息,则大于55s才会断开(确保心跳和延时控制下发)
+        x.end();
+        removeSocket(x);
+      }
+    });
   }
 }
 
-/* 消息序列化
-  举例: msg:1629807202667:{a:1,b:2} 或者
-  举例: msg:1629807202667:base64:xxxxxxxx 
-  举例: msg:1629807202667:base64:gzip:xxxxxxxx 
+/* 消息序列化, 对应sse消息的data部分
+  举例: 1629807202667:{a:1,b:2} 或者
+  举例: 1629807202667:base64:xxxxxxxx 
+  举例: 1629807202667:base64:gzip:xxxxxxxx 
 */
 function encodeMsg(msg){
+  let msgData = msg;
   let msg_id = msg.msg_id || snowflakeId();
   if(msg instanceof Buffer){
     //TODO: 原始二进制的数据,待实现
+    msgData = msg;
   }else if(typeof msg !== 'string'){
     if(!msg.msg_id){
       msg.msg_id = msg_id;
     }
-    msg = JSON.stringify(msg);
+    msgData = JSON.stringify(msg);
   }
-  if(msg.indexOf('\n\n')!==-1||msg.length>2048){ //长度大于2K或者如果含有特殊字符\n\n,则转base64后传输; 不含有特殊字符的直接传
+  if(msgData.indexOf('\n\n')!==-1||msgData.length>2048){ //长度大于2K或者如果含有特殊字符\n\n,则转base64后传输; 不含有特殊字符的直接传
     // msg='base64:'+ Buffer.from(unescape(encodeURIComponent(msg))).toString('base64'); 
     //后端转base64不需要encodeURIComponent,前端仍然需要
-    msg='base64:gzip:'+ zlib.gzipSync(msg).toString('base64');
-  }else if(msg instanceof Buffer){
-    msg='base64:'+msg.toString('base64');
+    msgData='base64:gzip:'+ zlib.gzipSync(msg).toString('base64');
+  }else if(msgData instanceof Buffer){
+    msgData='base64:'+msgData.toString('base64');
   }
+  return Date.now()+':'+msgData;
 }
 
-// function write(res, msg){
-//   let text = 'retry:'+retry+'\n\n'+'event: '+type+'\nid: '+msg_id+'\ndata:'+Date.now()+':'+msg+' '+'\n\n';
-// }
+/** 向一个数据流写入单条数据 **/
+function writeRes(res, data='', type='msg', msg_id='', retry=''){
+  if(isClose(res)){
+    return;
+  }
+  if(!retry){
+    retry = randomTime();
+  }
+  let text = 'retry:'+retry+'\n\n'+'event: '+type;
+  if(msg_id){
+    text += '\nid: '+msg_id;
+  }
+  text += '\ndata:'+data+' '+'\n\n';
+  console.log('发送SSE消息:',res.client_id, text);
+  res.write(text);
+  res.last_msg_id = msg_id; //目前服务端记录last_msg_id仅是为了定位用,暂没有用于逻辑控制.
+}
 
 /**
  * 根据客户端id或连接移除一个客户端缓存
@@ -165,12 +173,13 @@ function addSocket(socket, client_id, last_msg_id){
   if(!CLIENT_SOCKET_MAP[client_id]){
     CLIENT_SOCKET_MAP[client_id] = socket;
   }else{
-    if(CLIENT_SOCKET_MAP[client_id].isClose){
+    if(isClose(CLIENT_SOCKET_MAP[client_id])){
       console.log('旧的连接已经断开,直接覆盖即可');
       //CLIENT_SOCKET_MAP[client_id].end();
     }else{
-      let retry = randomTime();
-      CLIENT_SOCKET_MAP[client_id].write('retry: '+retry+'\nevent: msg\ndata:Other_SSE_Connected\n\n');
+      writeRes(socket,'Other_SSE_Connected','msg');
+      // let retry = randomTime();
+      // CLIENT_SOCKET_MAP[client_id].write('retry: '+retry+'\nevent: msg\ndata:Other_SSE_Connected\n\n');
       CLIENT_SOCKET_MAP[client_id].end();
     }
     //已经存在对应的连接, 放弃或者覆盖：【覆盖】 
@@ -199,8 +208,7 @@ function sendLastestMsgAndClose(res, client_id, last_msg_id, doNotClose=false){
     msgList.push('连接成功');//补充一个默认消息
   }
   msgList.forEach(x=>sendMsgToRes(res, x, 100, {doNotClose:true}));
-  let retry = randomTime(); //retry时间选10ms到210ms内的随机数,这个是长轮询的时间间隔
-  res.write('retry: '+retry+'\nevent: msg\ndata:\n\n');
+  writeRes(res,'');
   if(!doNotClose && hasMsg){ //有真实消息,且模式为长轮询,则下发消息后关闭.
     res.end();
     removeSocket(res);
@@ -221,10 +229,17 @@ function getMsgListForClient({client_id, last_msg_id=0}){
 function reconnectClient(client_id){
   console.log('查询并关闭如下连接:', client_id);
   let res = CLIENT_SOCKET_MAP[client_id];
-  let t = randomTime();
-  res.write('retry:'+t+'\n\nevent: msg\nid: '+snowflakeId()+'\ndata:'+Date.now()+':自动重连\n\n');
+  if(!res){
+    return;
+  }
+  writeRes(res, '自动重连', 'msg');
   res.end();
   removeSocket(res);
+}
+
+function isClose(socket){
+  let isOpen = socket && socket.connection && socket.connection.writable;
+  return !isOpen;
 }
 
 /**
@@ -234,7 +249,7 @@ function clearClosedSocket(){
   Object.keys(CLIENT_SOCKET_MAP).forEach(k=>{
       //由于涉及到从数组中删除元素,会导致length变化,故采用从后向前遍历的方式
       let socket = CLIENT_SOCKET_MAP[k];
-      if(socket.isClose){
+      if(isClose(socket)){
         delete CLIENT_SOCKET_MAP[k];
       }
   });

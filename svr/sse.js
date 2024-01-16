@@ -15,10 +15,10 @@ router.get('/sse_connect', sseLib.sseConnect);
 router.post('/send_msg', function(req, res, next){
   let {client_id='', msg=null} = req.body;
   if(!client_id){
-    return {error_code:1,msg:'参数格式不合法,请检查client_id',data:false};
+    return res.send({error_code:1,msg:'参数格式不合法,请检查client_id',data:false});
   }
   let ans = sseLib.sendMsgToClientId(client_id, msg);
-  return {error_code:0, msg:ans?'消息发送成功' :'消息发送失败', data: ans};
+  return res.send({error_code:0, msg:ans?'消息发送成功' :'消息发送失败', data: ans});
 });
 
 
